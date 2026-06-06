@@ -67,7 +67,7 @@ def redis_set(key, value):
 
 
 recent_titles: set = set(redis_get("sent_titles", []))
-feed_index: int = redis_get("feed_index", 0)
+feed_index: int = int(redis_get("feed_index", 0) or 0)
 
 print(f"[Start] Пам'ять: {len(recent_titles)} заголовків, наступний сайт: {RSS_FEEDS[feed_index % len(RSS_FEEDS)][0]}")
 
