@@ -5,7 +5,7 @@ import schedule
 import urllib3
 from datetime import datetime, timedelta
 
-# Вимикаємо перевірку SSL сертифікатів
+# Вимикаємо помилки SSL для карти тривог
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TOKEN = "8847992261:AAGlg560Vo60cV2uIYNRwfDTgUcZdPun5eQ"
@@ -20,25 +20,20 @@ RSS_URLS = [
     "https://censor.net/ua/rss/news"
 ]
 
-# Пам'ять для заголовків (щоб не кидати схожі)
 recent_titles = []
-
-def get_time():
-    return datetime.now().strftime("%H:%M")
 
 def send_to_telegram(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": CHANNEL_ID, "text": text, "parse_mode": "HTML"}
     try:
         response = requests.post(url, json=payload)
-        if response.status_code == 429:
-            time.sleep(30) # Чекаємо, якщо отримали бан за швидкість
+        if response.status_code == 429: # Якщо Телеграм каже "забагато запитів"
+            time.sleep(30)
     except: pass
 
 def check_news():
     global recent_titles
     limit = datetime.now() - timedelta(hours=3)
-    time_str = get_time()
     
     for url in RSS_URLS:
         try:
@@ -51,28 +46,25 @@ def check_news():
                     pub_time = datetime.fromtimestamp(time.mktime(entry.published_parsed))
                     if pub_time < limit: continue
                 
-                message = f"<b>📰 {title}</b>\n\n🕒 <i>{time_str}</i>\n\n<a href='{entry.link}'>Читати...</a>"
+                message = f"<b>📰 {title}</b>\n\n🕒 <i>{datetime.now().strftime('%H:%M')}</i>\n\n<a href='{entry.link}'>Читати...</a>"
                 send_to_telegram(message)
-                
                 recent_titles.append(title)
                 if len(recent_titles) > 50: recent_titles.pop(0)
-                time.sleep(15) # Пауза між новинами - НЕ ЧІПАЙ ЇЇ
+                time.sleep(15) 
         except: continue
 
 def send_alerts_map():
-    time_str = get_time()
     try:
         resp = requests.get("https://war-api.ukrzen.in.ua/alerts/api/alerts/active.json", verify=False, timeout=10)
         alerts = resp.json().get("alerts", [])
-        if not alerts:
-            msg = f"<b>🚨 Карта тривог ({time_str})</b>\n🟢 Наразі тихо."
-        else:
-            locs = sorted(list(set([i.get("location_title") for i in alerts if i.get("location_title")])))
-            msg = f"<b>🚨 Тривога станом на {time_str}:</b>\n\n" + "\n".join([f"🔴 {l}" for l in locs])
+        msg = f"<b>🚨 Карта тривог ({datetime.now().strftime('%H:%M')})</b>\n\n"
+        msg += "🟢 Наразі тихо." if not alerts else "<b>Тривога в:</b>\n" + "\n".join([f"🔴 {i.get('location_title')}" for i in alerts if i.get('location_title')])
         send_to_telegram(msg)
     except: pass
 
 if __name__ == "__main__":
+    check_news()
+    send_alerts_map()
     schedule.every(15).minutes.do(check_news)
     schedule.every(1).hours.do(send_alerts_map)
     while True:
