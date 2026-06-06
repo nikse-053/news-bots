@@ -1,4 +1,6 @@
 import time
+import json
+import os
 import feedparser
 import requests
 import schedule
@@ -9,9 +11,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TOKEN = "8847992261:AAGlg560Vo60cV2uIYNRwfDTgUcZdPun5eQ"
 CHANNEL_ID = "@novini_ua_10"
-
-# Пам'ять заголовків (не скидається між циклами)
-recent_titles = set()
+MEMORY_FILE = "sent_titles.json"  # Файл для збереження пам'яті між перезапусками
 
 RSS_FEEDS = [
     "https://feeds.bbci.co.uk/ukrainian/rss.xml",
@@ -25,8 +25,32 @@ RSS_FEEDS = [
 KYIV_TZ = timezone(timedelta(hours=3))
 
 
+# ─── Пам'ять (зберігається між перезапусками) ───────────────────────────────
+
+def load_memory() -> set:
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except Exception:
+            pass
+    return set()
+
+def save_memory(titles: set):
+    try:
+        # Зберігаємо лише останні 300 заголовків
+        data = list(titles)[-300:]
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Memory] Помилка збереження: {e}")
+
+recent_titles: set = load_memory()
+
+
+# ─── Telegram ────────────────────────────────────────────────────────────────
+
 def send_message(text: str) -> bool:
-    """Надсилає повідомлення в канал. Повертає True якщо успішно."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_ID,
@@ -45,17 +69,28 @@ def send_message(text: str) -> bool:
         return False
 
 
+# ─── Допоміжні функції ───────────────────────────────────────────────────────
+
 def parse_entry_time(entry) -> datetime | None:
-    """Витягує час публікації з запису RSS."""
     for field in ("published_parsed", "updated_parsed"):
         t = getattr(entry, field, None)
         if t:
             return datetime(*t[:6], tzinfo=timezone.utc).astimezone(KYIV_TZ)
     return None
 
+def normalize_title(title: str) -> str:
+    """Нормалізуємо заголовок для порівняння — без зайвих пробілів, в нижньому регістрі."""
+    return " ".join(title.lower().split())
+
+def now_str() -> str:
+    return datetime.now(KYIV_TZ).strftime("%H:%M:%S")
+
+
+# ─── Основні задачі ──────────────────────────────────────────────────────────
 
 def check_news():
-    """Відправляє одну нову новину з будь-якого з джерел."""
+    """Відправляє одну нову новину (перша знайдена з будь-якого джерела)."""
+    global recent_titles
     print(f"[{now_str()}] Перевірка новин...")
 
     for url in RSS_FEEDS:
@@ -66,9 +101,12 @@ def check_news():
 
             for entry in feed.entries[:5]:
                 title = entry.get("title", "").strip()
-                link = entry.get("link", "").strip()
+                link  = entry.get("link",  "").strip()
+                if not title or not link:
+                    continue
 
-                if not title or title in recent_titles:
+                key = normalize_title(title)  # порівнюємо нормалізовано
+                if key in recent_titles:
                     continue
 
                 pub_time = parse_entry_time(entry)
@@ -81,14 +119,9 @@ def check_news():
                 )
 
                 if send_message(msg):
-                    recent_titles.add(title)
-                    # Обмежуємо розмір пам'яті
-                    if len(recent_titles) > 200:
-                        # Видаляємо найстаріші (перший доданий)
-                        oldest = next(iter(recent_titles))
-                        recent_titles.discard(oldest)
-
-                    print(f"[{now_str()}] ✅ Відправлено: {title[:60]}")
+                    recent_titles.add(key)
+                    save_memory(recent_titles)
+                    print(f"[{now_str()}] ✅ Відправлено: {title[:70]}")
                     return  # Одна новина за раз — виходимо
 
         except Exception as e:
@@ -109,22 +142,15 @@ def send_alerts_map():
         )
         resp.raise_for_status()
         alerts = resp.json().get("alerts", [])
-
         timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
 
         if not alerts:
-            msg = (
-                f"<b>🚨 Карта тривог</b> | {timestamp}\n\n"
-                f"🟢 Наразі по всій Україні тихо."
-            )
+            msg = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
         else:
             regions = "\n".join(
                 f"🔴 {a.get('location_title', 'Невідомий регіон')}" for a in alerts
             )
-            msg = (
-                f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n"
-                f"{regions}"
-            )
+            msg = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions}"
 
         send_message(msg)
         print(f"[{now_str()}] ✅ Карту тривог відправлено ({len(alerts)} регіонів).")
@@ -133,12 +159,11 @@ def send_alerts_map():
         print(f"[Alerts Error] {e}")
 
 
-def now_str() -> str:
-    return datetime.now(KYIV_TZ).strftime("%H:%M:%S")
-
+# ─── Запуск ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("🤖 Бот запущено!")
+    print(f"   Завантажено {len(recent_titles)} заголовків з пам'яті.")
 
     # Одразу при старті
     check_news()
