@@ -174,28 +174,60 @@ def check_news():
 
 # ── Тривоги ──────────────────────────────────────────────────────────────────
 
+def _fetch_alerts_com_ua() -> list:
+    """alerts.com.ua — повертає список назв регіонів з тривогою."""
+    resp = requests.get(
+        "https://alerts.com.ua/api/states",
+        headers={"X-API-Key": "volumetric"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    states = resp.json().get("states", [])
+    return [s["name"] for s in states if s.get("alert")]
+
+def _fetch_ukrainealarm() -> list:
+    """ukrainealarm.com — резервний API."""
+    resp = requests.get(
+        "https://api.ukrainealarm.com/api/v3/alerts",
+        headers={"Authorization": "volumetric"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return [
+        r.get("regionName", "?")
+        for r in data
+        if r.get("activeAlerts")
+    ]
+
 def send_alerts_map():
     print(f"[{now_str()}] Перевірка тривог...")
-    try:
-        resp = requests.get(
-            "https://war-api.ukrzen.in.ua/alerts/api/alerts/active.json",
-            verify=False, timeout=10,
-        )
-        resp.raise_for_status()
-        alerts = resp.json().get("alerts", [])
-        timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
 
-        if not alerts:
-            msg = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
-        else:
-            regions = "\n".join(f"🔴 {a.get('location_title', '?')}" for a in alerts)
-            msg = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions}"
+    # Кілька API по черзі — якщо один не працює, пробуємо наступний
+    apis = [
+        ("alerts.com.ua", lambda: _fetch_alerts_com_ua()),
+        ("ukrainealarm",  lambda: _fetch_ukrainealarm()),
+    ]
 
-        send_message(msg)
-        print(f"[{now_str()}] ✅ Тривоги: {len(alerts)} регіонів.")
+    for api_name, fetcher in apis:
+        try:
+            active_regions = fetcher()
+            timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
 
-    except Exception as e:
-        print(f"[Alerts Error] {e}")
+            if not active_regions:
+                msg = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
+            else:
+                regions = "\n".join(f"🔴 {r}" for r in active_regions)
+                msg = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions}"
+
+            send_message(msg)
+            print(f"[{now_str()}] ✅ [{api_name}] Тривоги: {len(active_regions)} регіонів.")
+            return
+
+        except Exception as e:
+            print(f"[Alerts Error] {api_name}: {e}")
+
+    print(f"[{now_str()}] ⚠️ Всі API тривог недоступні.")
 
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
