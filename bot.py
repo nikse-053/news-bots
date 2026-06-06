@@ -1,10 +1,11 @@
-import os
 import time
 import feedparser
 import requests
 import schedule
+import urllib3
 from datetime import datetime, timedelta
-import time as time_module
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TOKEN = "8847992261:AAGlg560Vo60cV2uIYNRwfDTgUcZdPun5eQ"
 CHANNEL_ID = "@novini_ua_10"
@@ -18,53 +19,61 @@ RSS_URLS = [
     "https://censor.net/ua/rss/news"
 ]
 
+recent_titles = []
+
+def get_current_time():
+    # Повертає час у форматі "14:00"
+    return datetime.now().strftime("%H:%M")
+
 def send_to_telegram(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": CHANNEL_ID, "text": text, "parse_mode": "HTML"}
     try:
-        response = requests.post(url, json=payload)
-        # Якщо забагато запитів - чекаємо
-        if response.status_code == 429:
-            retry_after = response.json().get("parameters", {}).get("retry_after", 30)
-            time.sleep(retry_after)
-    except Exception as e:
-        print(f"🔴 Помилка: {e}")
+        requests.post(url, json=payload)
+    except:
+        pass
 
 def check_news():
-    print("🔄 Перевірка новин...")
-    # Публікуємо лише те, що вийшло за останні 2 години
-    time_limit = datetime.now() - timedelta(hours=2)
-
+    global recent_titles
+    limit = datetime.now() - timedelta(hours=3)
+    time_str = get_current_time()
+    
     for url in RSS_URLS:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:3]: # Обмежили до 3 новини за раз
-                if hasattr(entry, 'published_parsed'):
-                    pub_time = datetime.fromtimestamp(time_module.mktime(entry.published_parsed))
-                    if pub_time < time_limit: continue
+            for entry in feed.entries[:3]:
+                title = entry.title.strip()
+                if title in recent_titles: continue
                 
-                title = entry.title
-                message = f"<b>📰 {title}</b>\n\n<a href='{entry.link}'>Читати повністю...</a>"
+                if hasattr(entry, 'published_parsed'):
+                    pub_time = datetime.fromtimestamp(time.mktime(entry.published_parsed))
+                    if pub_time < limit: continue
+                
+                # Додаємо час у заголовок
+                message = f"<b>📰 {title}</b>\n\n🕒 <i>Час: {time_str}</i>\n\n<a href='{entry.link}'>Читати повністю...</a>"
                 send_to_telegram(message)
-                time.sleep(5) # Пауза між повідомленнями, щоб не отримати бан
-        except Exception as e:
-            print(f"🔴 Помилка RSS: {e}")
+                
+                recent_titles.append(title)
+                if len(recent_titles) > 50: recent_titles.pop(0)
+                time.sleep(15)
+        except: continue
 
 def send_alerts_map():
-    print("🚨 Формую мапу тривог...")
+    time_str = get_current_time()
     try:
-        # verify=False ігнорує помилку сертифіката
-        response = requests.get("https://war-api.ukrzen.in.ua/alerts/api/alerts/active.json", verify=False)
-        if response.status_code == 200:
-            alerts = response.json().get("alerts", [])
-            message = "<b>🚨 Карта тривог</b>\n\n🟢 Тихо." if not alerts else "<b>🚨 Тривога в:</b>\n" + "\n".join([f"🔴 {item.get('location_title')}" for item in alerts])
-            send_to_telegram(message)
-    except Exception as e:
-        print(f"🔴 Помилка мапи: {e}")
+        resp = requests.get("https://war-api.ukrzen.in.ua/alerts/api/alerts/active.json", verify=False, timeout=10)
+        alerts = resp.json().get("alerts", [])
+        if not alerts:
+            msg = f"<b>🚨 Карта тривог ({time_str})</b>\n🟢 Наразі тихо."
+        else:
+            locs = sorted(list(set([i.get("location_title") for i in locs if i.get("location_title")]))) # виправив логіку
+            msg = f"<b>🚨 Тривога станом на {time_str}:</b>\n\n" + "\n".join([f"🔴 {l}" for l in locs])
+        send_to_telegram(msg)
+    except: pass
 
 if __name__ == "__main__":
-    schedule.every(30).minutes.do(check_news)
+    schedule.every(15).minutes.do(check_news)
     schedule.every(1).hours.do(send_alerts_map)
     while True:
         schedule.run_pending()
-        time.sleep(1)
+        time.sleep(60)
