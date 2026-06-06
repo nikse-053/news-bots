@@ -44,7 +44,13 @@ def redis_get(key, default):
             timeout=5,
         )
         val = r.json().get("result")
-        return json.loads(val) if val else default
+        if val is None:
+            return default
+        parsed = json.loads(val)
+        # Якщо збережено як {"value": "..."} — розпаковуємо
+        if isinstance(parsed, dict) and "value" in parsed:
+            return json.loads(parsed["value"])
+        return parsed
     except Exception as e:
         print(f"[Redis GET] {e}")
         return default
@@ -53,13 +59,11 @@ def redis_set(key, value):
     if not UPSTASH_URL:
         return
     try:
-        requests.post(
-            f"{UPSTASH_URL}/set/{key}",
-            headers={
-                "Authorization": f"Bearer {UPSTASH_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            data=json.dumps({"value": json.dumps(value, ensure_ascii=False)}),
+        # Зберігаємо через GET-запит /set/key/value — найпростіший формат Upstash REST
+        encoded = requests.utils.quote(json.dumps(value, ensure_ascii=False))
+        requests.get(
+            f"{UPSTASH_URL}/set/{key}/{encoded}",
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
             timeout=5,
         )
     except Exception as e:
@@ -67,7 +71,9 @@ def redis_set(key, value):
 
 
 recent_titles: set = set(redis_get("sent_titles", []))
-feed_index: int = int(redis_get("feed_index", 0) or 0)
+feed_index: int = redis_get("feed_index", 0)
+if not isinstance(feed_index, int):
+    feed_index = 0
 
 print(f"[Start] Пам'ять: {len(recent_titles)} заголовків, наступний сайт: {RSS_FEEDS[feed_index % len(RSS_FEEDS)][0]}")
 
