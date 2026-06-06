@@ -5,7 +5,7 @@ import requests
 import schedule
 
 # --- НАЛАШТУВАННЯ ---
-TOKEN = "ТВІЙ_ТЕЛЕГРАМ_ТОКЕН_ТУТ"
+TOKEN = "8847992261:AAGlg560Vo60cV2uIYNRwfDTgUcZdPun5eQ"
 CHANNEL_ID = "@novini_ua_10"
 
 # Розширений список джерел новин (6 сайтів)
