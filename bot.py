@@ -122,60 +122,75 @@ def now_str() -> str:
 def check_news():
     global recent_titles, feed_index
 
-    for i in range(len(RSS_FEEDS)):
-        idx = (feed_index + i) % len(RSS_FEEDS)
-        source_name, url = RSS_FEEDS[idx]
+    # Беремо ТІЛЬКИ поточний сайт — без переходу до інших
+    source_name, url = RSS_FEEDS[feed_index % len(RSS_FEEDS)]
+    print(f"[{now_str()}] Перевірка: {source_name}")
 
-        print(f"[{now_str()}] Перевірка: {source_name}")
+    try:
+        feed = feedparser.parse(url, request_headers={"User-Agent": "Mozilla/5.0"})
 
-        try:
-            feed = feedparser.parse(url, request_headers={"User-Agent": "Mozilla/5.0"})
+        fresh = [
+            e for e in feed.entries[:20]
+            if is_fresh(e) and normalize(e.get("title", "")) not in recent_titles
+        ]
 
-            # Фільтруємо: тільки свіжі + не відправлені
-            fresh = [
-                e for e in feed.entries[:20]
-                if is_fresh(e) and normalize(e.get("title", "")) not in recent_titles
-            ]
+        if not fresh:
+            print(f"[{now_str()}] [{source_name}] Свіжих новин немає — переходимо до наступного сайту")
+            # Навіть якщо нема новин — переходимо до наступного сайту
+            feed_index = (feed_index + 1) % len(RSS_FEEDS)
+            redis_set("feed_index", feed_index)
+            return
 
-            if not fresh:
-                print(f"[{now_str()}] [{source_name}] Свіжих новин немає")
-                continue
+        # Беремо найсвіжішу
+        entry = sorted(fresh, key=lambda e: parse_entry_time(e), reverse=True)[0]
 
-            # Беремо найсвіжішу
-            entry = sorted(fresh, key=lambda e: parse_entry_time(e), reverse=True)[0]
+        title = entry.get("title", "").strip()
+        link  = entry.get("link",  "").strip()
+        pub   = parse_entry_time(entry).astimezone(KYIV_TZ)
+        time_str = pub.strftime("🕐 %H:%M, %d.%m.%Y")
 
-            title = entry.get("title", "").strip()
-            link  = entry.get("link",  "").strip()
-            pub   = parse_entry_time(entry).astimezone(KYIV_TZ)
-            time_str = pub.strftime("🕐 %H:%M, %d.%m.%Y")
+        msg = (
+            f"<b>📰 {title}</b>\n"
+            f"{time_str}\n\n"
+            f"<a href='{link}'>Читати повністю →</a>"
+        )
 
-            msg = (
-                f"<b>📰 {title}</b>\n"
-                f"{time_str}\n\n"
-                f"<a href='{link}'>Читати повністю →</a>"
-            )
+        if send_message(msg):
+            recent_titles.add(normalize(title))
+            feed_index = (feed_index + 1) % len(RSS_FEEDS)
 
-            if send_message(msg):
-                recent_titles.add(normalize(title))
-                feed_index = (idx + 1) % len(RSS_FEEDS)
+            redis_set("sent_titles", list(recent_titles)[-300:])
+            redis_set("feed_index", feed_index)
 
-                redis_set("sent_titles", list(recent_titles)[-300:])
-                redis_set("feed_index", feed_index)
+            print(f"[{now_str()}] ✅ [{source_name}] {title[:60]}")
+            print(f"[{now_str()}] → Наступний: {RSS_FEEDS[feed_index][0]}")
 
-                print(f"[{now_str()}] ✅ [{source_name}] {title[:60]}")
-                print(f"[{now_str()}] → Наступний: {RSS_FEEDS[feed_index][0]}")
-                return
-
-        except Exception as e:
-            print(f"[RSS Error] {source_name}: {e}")
-
-    print(f"[{now_str()}] Свіжих новин не знайдено ні на одному сайті.")
+    except Exception as e:
+        print(f"[RSS Error] {source_name}: {e}")
+        feed_index = (feed_index + 1) % len(RSS_FEEDS)
+        redis_set("feed_index", feed_index)
 
 
 # ── Тривоги ──────────────────────────────────────────────────────────────────
 
+# Координати центрів регіонів на карті (x, y) для полотна 800x600
+REGION_COORDS = {
+    "Вінницька":       (270, 310), "Волинська":       (130, 180),
+    "Дніпропетровська":(460, 360), "Донецька":        (580, 340),
+    "Житомирська":     (220, 230), "Закарпатська":    ( 80, 320),
+    "Запорізька":      (500, 410), "Івано-Франківська":(130, 310),
+    "Київська":        (310, 220), "Кіровоградська":  (370, 340),
+    "Луганська":       (640, 300), "Львівська":       (120, 260),
+    "Миколаївська":    (390, 420), "Одеська":         (330, 450),
+    "Полтавська":      (460, 280), "Рівненська":      (175, 215),
+    "Сумська":         (480, 200), "Тернопільська":   (170, 285),
+    "Харківська":      (540, 240), "Херсонська":      (450, 440),
+    "Хмельницька":     (210, 280), "Черкаська":       (370, 290),
+    "Чернівецька":     (185, 345), "Чернігівська":    (360, 170),
+    "Київ":            (320, 235), "Крим":            (430, 490),
+}
+
 def _fetch_alerts_com_ua() -> list:
-    """alerts.com.ua — повертає список назв регіонів з тривогою."""
     resp = requests.get(
         "https://alerts.com.ua/api/states",
         headers={"X-API-Key": "volumetric"},
@@ -185,49 +200,100 @@ def _fetch_alerts_com_ua() -> list:
     states = resp.json().get("states", [])
     return [s["name"] for s in states if s.get("alert")]
 
-def _fetch_ukrainealarm() -> list:
-    """ukrainealarm.com — резервний API."""
-    resp = requests.get(
-        "https://api.ukrainealarm.com/api/v3/alerts",
-        headers={"Authorization": "volumetric"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return [
-        r.get("regionName", "?")
-        for r in data
-        if r.get("activeAlerts")
-    ]
+def generate_map_image(active_regions: list) -> bytes:
+    """Генерує PNG карту України з підсвіченими регіонами."""
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+
+    W, H = 800, 600
+    img = Image.new("RGB", (W, H), color=(30, 30, 46))
+    draw = ImageDraw.Draw(img)
+
+    # Фон — схематичний контур України (прямокутник з закругленням)
+    draw.rounded_rectangle([60, 100, 740, 540], radius=20, outline=(80, 80, 100), width=2)
+
+    # Малюємо всі регіони
+    for name, (x, y) in REGION_COORDS.items():
+        # Нормалізуємо для порівняння
+        is_alert = any(name.lower() in r.lower() or r.lower() in name.lower()
+                      for r in active_regions)
+
+        if is_alert:
+            color = (220, 50, 50)    # червоний — тривога
+            text_color = (255, 255, 255)
+        else:
+            color = (60, 100, 60)    # зелений — тихо
+            text_color = (200, 230, 200)
+
+        # Коло регіону
+        r = 28
+        draw.ellipse([x-r, y-r, x+r, y+r], fill=color, outline=(255,255,255), width=1)
+
+        # Назва (скорочена)
+        short = name.replace("ська", "").replace("ська", "")[:6]
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 10)
+        except Exception:
+            font = ImageFont.load_default()
+        draw.text((x, y), short, fill=text_color, font=font, anchor="mm")
+
+    # Легенда
+    draw.ellipse([70, 555, 86, 571], fill=(220, 50, 50))
+    draw.text((92, 563), "Тривога", fill=(255,255,255), anchor="lm",
+              font=ImageFont.load_default())
+    draw.ellipse([170, 555, 186, 571], fill=(60, 100, 60))
+    draw.text((192, 563), "Тихо", fill=(255,255,255), anchor="lm",
+              font=ImageFont.load_default())
+
+    # Час
+    ts = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
+    draw.text((W//2, 575), ts, fill=(180,180,180), anchor="mm",
+              font=ImageFont.load_default())
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf.read()
+
+def send_photo_to_telegram(image_bytes: bytes, caption: str):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    try:
+        resp = requests.post(url, data={
+            "chat_id": CHANNEL_ID,
+            "caption": caption,
+            "parse_mode": "HTML",
+        }, files={"photo": ("map.png", image_bytes, "image/png")}, timeout=15)
+        if not resp.ok:
+            print(f"[TG Photo Error] {resp.status_code}: {resp.text[:200]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[TG Photo Exception] {e}")
+        return False
 
 def send_alerts_map():
     print(f"[{now_str()}] Перевірка тривог...")
+    try:
+        active_regions = _fetch_alerts_com_ua()
+        timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
 
-    # Кілька API по черзі — якщо один не працює, пробуємо наступний
-    apis = [
-        ("alerts.com.ua", lambda: _fetch_alerts_com_ua()),
-        ("ukrainealarm",  lambda: _fetch_ukrainealarm()),
-    ]
+        if not active_regions:
+            caption = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
+        else:
+            regions_text = "\n".join(f"🔴 {r}" for r in active_regions)
+            caption = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions_text}"
 
-    for api_name, fetcher in apis:
         try:
-            active_regions = fetcher()
-            timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
-
-            if not active_regions:
-                msg = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
-            else:
-                regions = "\n".join(f"🔴 {r}" for r in active_regions)
-                msg = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions}"
-
-            send_message(msg)
-            print(f"[{now_str()}] ✅ [{api_name}] Тривоги: {len(active_regions)} регіонів.")
-            return
-
+            img = generate_map_image(active_regions)
+            send_photo_to_telegram(img, caption)
         except Exception as e:
-            print(f"[Alerts Error] {api_name}: {e}")
+            print(f"[Map Gen Error] {e} — відправляємо текст")
+            send_message(caption)
 
-    print(f"[{now_str()}] ⚠️ Всі API тривог недоступні.")
+        print(f"[{now_str()}] ✅ Тривоги: {len(active_regions)} регіонів.")
+
+    except Exception as e:
+        print(f"[Alerts Error] {e}")
 
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
