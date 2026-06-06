@@ -173,127 +173,49 @@ def check_news():
 
 # ── Тривоги ──────────────────────────────────────────────────────────────────
 
-# Координати центрів регіонів на карті (x, y) для полотна 800x600
-REGION_COORDS = {
-    "Вінницька":       (270, 310), "Волинська":       (130, 180),
-    "Дніпропетровська":(460, 360), "Донецька":        (580, 340),
-    "Житомирська":     (220, 230), "Закарпатська":    ( 80, 320),
-    "Запорізька":      (500, 410), "Івано-Франківська":(130, 310),
-    "Київська":        (310, 220), "Кіровоградська":  (370, 340),
-    "Луганська":       (640, 300), "Львівська":       (120, 260),
-    "Миколаївська":    (390, 420), "Одеська":         (330, 450),
-    "Полтавська":      (460, 280), "Рівненська":      (175, 215),
-    "Сумська":         (480, 200), "Тернопільська":   (170, 285),
-    "Харківська":      (540, 240), "Херсонська":      (450, 440),
-    "Хмельницька":     (210, 280), "Черкаська":       (370, 290),
-    "Чернівецька":     (185, 345), "Чернігівська":    (360, 170),
-    "Київ":            (320, 235), "Крим":            (430, 490),
-}
-
-def _fetch_alerts_com_ua() -> list:
-    resp = requests.get(
-        "https://alerts.com.ua/api/states",
-        headers={"X-API-Key": "volumetric"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    states = resp.json().get("states", [])
-    return [s["name"] for s in states if s.get("alert")]
-
-def generate_map_image(active_regions: list) -> bytes:
-    """Генерує PNG карту України з підсвіченими регіонами."""
-    from PIL import Image, ImageDraw, ImageFont
-    import io
-
-    W, H = 800, 600
-    img = Image.new("RGB", (W, H), color=(30, 30, 46))
-    draw = ImageDraw.Draw(img)
-
-    # Фон — схематичний контур України (прямокутник з закругленням)
-    draw.rounded_rectangle([60, 100, 740, 540], radius=20, outline=(80, 80, 100), width=2)
-
-    # Малюємо всі регіони
-    for name, (x, y) in REGION_COORDS.items():
-        # Нормалізуємо для порівняння
-        is_alert = any(name.lower() in r.lower() or r.lower() in name.lower()
-                      for r in active_regions)
-
-        if is_alert:
-            color = (220, 50, 50)    # червоний — тривога
-            text_color = (255, 255, 255)
-        else:
-            color = (60, 100, 60)    # зелений — тихо
-            text_color = (200, 230, 200)
-
-        # Коло регіону
-        r = 28
-        draw.ellipse([x-r, y-r, x+r, y+r], fill=color, outline=(255,255,255), width=1)
-
-        # Назва (скорочена)
-        short = name.replace("ська", "").replace("ська", "")[:6]
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 10)
-        except Exception:
-            font = ImageFont.load_default()
-        draw.text((x, y), short, fill=text_color, font=font, anchor="mm")
-
-    # Легенда
-    draw.ellipse([70, 555, 86, 571], fill=(220, 50, 50))
-    draw.text((92, 563), "Тривога", fill=(255,255,255), anchor="lm",
-              font=ImageFont.load_default())
-    draw.ellipse([170, 555, 186, 571], fill=(60, 100, 60))
-    draw.text((192, 563), "Тихо", fill=(255,255,255), anchor="lm",
-              font=ImageFont.load_default())
-
-    # Час
-    ts = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
-    draw.text((W//2, 575), ts, fill=(180,180,180), anchor="mm",
-              font=ImageFont.load_default())
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf.read()
-
-def send_photo_to_telegram(image_bytes: bytes, caption: str):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-    try:
-        resp = requests.post(url, data={
-            "chat_id": CHANNEL_ID,
-            "caption": caption,
-            "parse_mode": "HTML",
-        }, files={"photo": ("map.png", image_bytes, "image/png")}, timeout=15)
-        if not resp.ok:
-            print(f"[TG Photo Error] {resp.status_code}: {resp.text[:200]}")
-            return False
-        return True
-    except Exception as e:
-        print(f"[TG Photo Exception] {e}")
-        return False
-
 def send_alerts_map():
     print(f"[{now_str()}] Перевірка тривог...")
-    try:
-        active_regions = _fetch_alerts_com_ua()
-        timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
+    timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
 
-        if not active_regions:
+    try:
+        # Отримуємо список регіонів з тривогою
+        resp = requests.get(
+            "https://alerts.com.ua/api/states",
+            headers={"X-API-Key": "volumetric"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        states = resp.json().get("states", [])
+        active = [s["name"] for s in states if s.get("alert")]
+
+        if not active:
             caption = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
         else:
-            regions_text = "\n".join(f"🔴 {r}" for r in active_regions)
+            regions_text = "\n".join(f"🔴 {r}" for r in active)
             caption = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions_text}"
 
-        try:
-            img = generate_map_image(active_regions)
-            send_photo_to_telegram(img, caption)
-        except Exception as e:
-            print(f"[Map Gen Error] {e} — відправляємо текст")
+        # Завантажуємо готову карту як картинку
+        map_url = f"https://alerts.in.ua/map.png?t={int(time.time())}"
+        img_resp = requests.get(map_url, timeout=15)
+
+        if img_resp.ok and img_resp.headers.get("content-type", "").startswith("image"):
+            url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+            requests.post(url, data={
+                "chat_id": CHANNEL_ID,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }, files={"photo": ("map.png", img_resp.content, "image/png")}, timeout=15)
+        else:
             send_message(caption)
 
-        print(f"[{now_str()}] ✅ Тривоги: {len(active_regions)} регіонів.")
+        print(f"[{now_str()}] ✅ Тривоги відправлено: {len(active)} регіонів.")
 
     except Exception as e:
         print(f"[Alerts Error] {e}")
+        try:
+            send_message(f"<b>🚨 Карта тривог</b> | {timestamp}\n\n⚠️ Не вдалось завантажити карту.")
+        except Exception:
+            pass
 
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
