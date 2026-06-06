@@ -15,77 +15,74 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID", "@novini_ua_10")
 UPSTASH_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
+# Максимальний вік новини — 2 години
+def get_max_age() -> int:
+    hour = datetime.now(KYIV_TZ).hour
+    return 180 if hour < 7 else 60  # вночі 3г, вдень 1г
+
 RSS_FEEDS = [
-    "https://feeds.bbci.co.uk/ukrainian/rss.xml",
-    "https://www.pravda.com.ua/rss/",
-    "https://rss.unian.net/site/news_ukr.rss",
-    "https://tsn.ua/rss/full.rss",
-    "https://www.rbc.ua/static/rss/news_ukr.xml",
-    "https://censor.net/ua/rss/news",
+    ("BBC Україна",       "https://feeds.bbci.co.uk/ukrainian/rss.xml"),
+    ("Українська правда", "https://www.pravda.com.ua/rss/"),
+    ("УНІАН",             "https://rss.unian.net/site/news_ukr.rss"),
+    ("ТСН",               "https://tsn.ua/rss/full.rss"),
+    ("РБК Україна",       "https://www.rbc.ua/static/rss/news_ukr.xml"),
+    ("Цензор",            "https://censor.net/ua/rss/news"),
 ]
 
 KYIV_TZ = timezone(timedelta(hours=3))
 
 
-# ── Redis: читання ───────────────────────────────────────────────────────────
-def redis_get() -> set:
+# ── Redis ────────────────────────────────────────────────────────────────────
+
+def redis_get(key, default):
     if not UPSTASH_URL:
-        print("[Redis] URL не вказано — пам'ять лише в оперативній")
-        return set()
+        return default
     try:
         r = requests.get(
-            f"{UPSTASH_URL}/get/sent_titles",
+            f"{UPSTASH_URL}/get/{key}",
             headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
             timeout=5,
         )
         val = r.json().get("result")
-        if val:
-            titles = set(json.loads(val))
-            print(f"[Redis] ✅ Завантажено {len(titles)} заголовків")
-            return titles
+        return json.loads(val) if val else default
     except Exception as e:
-        print(f"[Redis GET] ⚠️ {e}")
-    return set()
+        print(f"[Redis GET] {e}")
+        return default
 
-
-# ── Redis: запис ─────────────────────────────────────────────────────────────
-def redis_set(titles: set):
+def redis_set(key, value):
     if not UPSTASH_URL:
         return
     try:
-        payload = json.dumps(list(titles)[-300:], ensure_ascii=False)
-        r = requests.post(
-            f"{UPSTASH_URL}/set/sent_titles",
+        requests.post(
+            f"{UPSTASH_URL}/set/{key}",
             headers={
                 "Authorization": f"Bearer {UPSTASH_TOKEN}",
                 "Content-Type": "application/json",
             },
-            data=json.dumps({"value": payload}),
+            data=json.dumps({"value": json.dumps(value, ensure_ascii=False)}),
             timeout=5,
         )
-        if r.ok:
-            print(f"[Redis] ✅ Збережено {len(titles)} заголовків")
-        else:
-            print(f"[Redis SET] ⚠️ {r.status_code}: {r.text[:100]}")
     except Exception as e:
-        print(f"[Redis SET] ⚠️ {e}")
+        print(f"[Redis SET] {e}")
 
 
-# Завантажуємо пам'ять при старті
-recent_titles: set = redis_get()
+recent_titles: set = set(redis_get("sent_titles", []))
+feed_index: int = redis_get("feed_index", 0)
+
+print(f"[Start] Пам'ять: {len(recent_titles)} заголовків, наступний сайт: {RSS_FEEDS[feed_index % len(RSS_FEEDS)][0]}")
 
 
 # ── Telegram ─────────────────────────────────────────────────────────────────
+
 def send_message(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHANNEL_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json={
+            "chat_id": CHANNEL_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        }, timeout=10)
         if not resp.ok:
             print(f"[TG Error] {resp.status_code}: {resp.text[:200]}")
             return False
@@ -96,12 +93,22 @@ def send_message(text: str) -> bool:
 
 
 # ── Допоміжні ────────────────────────────────────────────────────────────────
-def parse_entry_time(entry):
+
+def parse_entry_time(entry) -> datetime | None:
     for field in ("published_parsed", "updated_parsed"):
         t = getattr(entry, field, None)
         if t:
-            return datetime(*t[:6], tzinfo=timezone.utc).astimezone(KYIV_TZ)
+            return datetime(*t[:6], tzinfo=timezone.utc)
     return None
+
+def is_fresh(entry) -> bool:
+    """Перевіряє чи новина не старіша за MAX_AGE_MINUTES."""
+    pub = parse_entry_time(entry)
+    if pub is None:
+        # Якщо час відсутній — пропускаємо, щоб не слати старе
+        return False
+    age = datetime.now(timezone.utc) - pub
+    return age.total_seconds() < get_max_age() * 60
 
 def normalize(title: str) -> str:
     return " ".join(title.lower().split())
@@ -111,45 +118,62 @@ def now_str() -> str:
 
 
 # ── Новини ───────────────────────────────────────────────────────────────────
-def check_news():
-    global recent_titles
-    print(f"[{now_str()}] Перевірка новин...")
 
-    for url in RSS_FEEDS:
+def check_news():
+    global recent_titles, feed_index
+
+    for i in range(len(RSS_FEEDS)):
+        idx = (feed_index + i) % len(RSS_FEEDS)
+        source_name, url = RSS_FEEDS[idx]
+
+        print(f"[{now_str()}] Перевірка: {source_name}")
+
         try:
             feed = feedparser.parse(url, request_headers={"User-Agent": "Mozilla/5.0"})
-            for entry in feed.entries[:5]:
-                title = entry.get("title", "").strip()
-                link  = entry.get("link",  "").strip()
-                if not title or not link:
-                    continue
 
-                key = normalize(title)
-                if key in recent_titles:
-                    continue
+            # Фільтруємо: тільки свіжі + не відправлені
+            fresh = [
+                e for e in feed.entries[:20]
+                if is_fresh(e) and normalize(e.get("title", "")) not in recent_titles
+            ]
 
-                pub_time = parse_entry_time(entry)
-                time_str = pub_time.strftime("🕐 %H:%M, %d.%m.%Y") if pub_time else ""
+            if not fresh:
+                print(f"[{now_str()}] [{source_name}] Свіжих новин немає")
+                continue
 
-                msg = (
-                    f"<b>📰 {title}</b>\n"
-                    f"{time_str}\n\n"
-                    f"<a href='{link}'>Читати повністю →</a>"
-                )
+            # Беремо найсвіжішу
+            entry = sorted(fresh, key=lambda e: parse_entry_time(e), reverse=True)[0]
 
-                if send_message(msg):
-                    recent_titles.add(key)
-                    redis_set(recent_titles)
-                    print(f"[{now_str()}] ✅ Відправлено: {title[:70]}")
-                    return  # одна новина за раз
+            title = entry.get("title", "").strip()
+            link  = entry.get("link",  "").strip()
+            pub   = parse_entry_time(entry).astimezone(KYIV_TZ)
+            time_str = pub.strftime("🕐 %H:%M, %d.%m.%Y")
+
+            msg = (
+                f"<b>📰 {title}</b>\n"
+                f"{time_str}\n\n"
+                f"<a href='{link}'>Читати повністю →</a>"
+            )
+
+            if send_message(msg):
+                recent_titles.add(normalize(title))
+                feed_index = (idx + 1) % len(RSS_FEEDS)
+
+                redis_set("sent_titles", list(recent_titles)[-300:])
+                redis_set("feed_index", feed_index)
+
+                print(f"[{now_str()}] ✅ [{source_name}] {title[:60]}")
+                print(f"[{now_str()}] → Наступний: {RSS_FEEDS[feed_index][0]}")
+                return
 
         except Exception as e:
-            print(f"[RSS Error] {url}: {e}")
+            print(f"[RSS Error] {source_name}: {e}")
 
-    print(f"[{now_str()}] Нових новин не знайдено.")
+    print(f"[{now_str()}] Свіжих новин не знайдено ні на одному сайті.")
 
 
 # ── Тривоги ──────────────────────────────────────────────────────────────────
+
 def send_alerts_map():
     print(f"[{now_str()}] Перевірка тривог...")
     try:
@@ -175,6 +199,7 @@ def send_alerts_map():
 
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     print("🤖 Бот запущено!")
 
