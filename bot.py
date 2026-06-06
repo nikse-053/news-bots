@@ -6,7 +6,6 @@ import schedule
 from datetime import datetime, timedelta
 import time as time_module
 
-# --- НАЛАШТУВАННЯ ---
 TOKEN = "8847992261:AAGlg560Vo60cV2uIYNRwfDTgUcZdPun5eQ"
 CHANNEL_ID = "@novini_ua_10"
 
@@ -21,61 +20,51 @@ RSS_URLS = [
 
 def send_to_telegram(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHANNEL_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False}
+    payload = {"chat_id": CHANNEL_ID, "text": text, "parse_mode": "HTML"}
     try:
-        requests.post(url, json=payload)
+        response = requests.post(url, json=payload)
+        # Якщо забагато запитів - чекаємо
+        if response.status_code == 429:
+            retry_after = response.json().get("parameters", {}).get("retry_after", 30)
+            time.sleep(retry_after)
     except Exception as e:
-        print(f"🔴 Помилка відправки: {e}")
+        print(f"🔴 Помилка: {e}")
 
 def check_news():
-    print("🔄 Перевіряю новини (фільтр 2 години)...")
+    print("🔄 Перевірка новин...")
+    # Публікуємо лише те, що вийшло за останні 2 години
     time_limit = datetime.now() - timedelta(hours=2)
 
     for url in RSS_URLS:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:5]: # Беремо 5 нових новин
-                # Перевірка часу публікації
+            for entry in feed.entries[:3]: # Обмежили до 3 новини за раз
                 if hasattr(entry, 'published_parsed'):
                     pub_time = datetime.fromtimestamp(time_module.mktime(entry.published_parsed))
-                    if pub_time < time_limit:
-                        continue 
+                    if pub_time < time_limit: continue
                 
                 title = entry.title
-                summary = getattr(entry, "summary", "")
-                if len(summary) > 300: summary = summary[:300] + "..."
-                
-                message = f"<b>📰 {title}</b>\n\n{summary}\n\n<a href='{entry.link}'>Читати повністю...</a>"
+                message = f"<b>📰 {title}</b>\n\n<a href='{entry.link}'>Читати повністю...</a>"
                 send_to_telegram(message)
-                time.sleep(3) 
+                time.sleep(5) # Пауза між повідомленнями, щоб не отримати бан
         except Exception as e:
-            print(f"🔴 Помилка: {e}")
+            print(f"🔴 Помилка RSS: {e}")
 
 def send_alerts_map():
-    print("🚨 Перевірка тривог...")
+    print("🚨 Формую мапу тривог...")
     try:
-        response = requests.get("https://war-api.ukrzen.in.ua/alerts/api/alerts/active.json")
+        # verify=False ігнорує помилку сертифіката
+        response = requests.get("https://war-api.ukrzen.in.ua/alerts/api/alerts/active.json", verify=False)
         if response.status_code == 200:
             alerts = response.json().get("alerts", [])
-            if not alerts:
-                message = "<b>🚨 Карта тривог</b>\n\n🟢 <b>Наразі тихо.</b>"
-            else:
-                places = sorted(list(set([item.get("location_title", "Регіон") for item in alerts])))
-                message = f"<b>🚨 Карта тривог</b>\n\n<b>Зараз тривога в:</b>\n\n" + "\n".join([f"🔴 {p}" for p in places])
+            message = "<b>🚨 Карта тривог</b>\n\n🟢 Тихо." if not alerts else "<b>🚨 Тривога в:</b>\n" + "\n".join([f"🔴 {item.get('location_title')}" for item in alerts])
             send_to_telegram(message)
     except Exception as e:
-        print(f"🔴 Помилка мапи тривог: {e}")
+        print(f"🔴 Помилка мапи: {e}")
 
 if __name__ == "__main__":
-    print("🤖 Бот запущений!")
-    # Перший запуск
-    check_news()
-    send_alerts_map()
-    
-    # Розклад
-    schedule.every(15).minutes.do(check_news)
+    schedule.every(30).minutes.do(check_news)
     schedule.every(1).hours.do(send_alerts_map)
-
     while True:
         schedule.run_pending()
         time.sleep(1)
