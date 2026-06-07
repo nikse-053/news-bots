@@ -201,16 +201,27 @@ def send_alerts_map():
             caption = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions_text}"
 
         # Завантажуємо готову карту як картинку
-        map_url = f"https://alerts.in.ua/map.png?t={int(time.time())}"
-        img_resp = requests.get(map_url, timeout=15)
+        map_urls = [
+            f"https://raid.fly.dev/map.png?t={int(time.time())}",
+            f"https://alerts.in.ua/map.png?t={int(time.time())}",
+        ]
+        img_bytes = None
+        for map_url in map_urls:
+            try:
+                img_resp = requests.get(map_url, timeout=15)
+                if img_resp.ok and "image" in img_resp.headers.get("content-type", ""):
+                    img_bytes = img_resp.content
+                    break
+            except Exception:
+                continue
 
-        if img_resp.ok and img_resp.headers.get("content-type", "").startswith("image"):
+        if img_bytes:
             url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
             requests.post(url, data={
                 "chat_id": CHANNEL_ID,
                 "caption": caption,
                 "parse_mode": "HTML",
-            }, files={"photo": ("map.png", img_resp.content, "image/png")}, timeout=15)
+            }, files={"photo": ("map.png", img_bytes, "image/png")}, timeout=15)
         else:
             send_message(caption)
 
@@ -226,14 +237,44 @@ def send_alerts_map():
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
 
+# Зберігаємо хеш останньої відправленої тривоги щоб не дублювати
+last_alert_hash: str = redis_get("last_alert_hash", "")
+
+def get_alert_hash(regions: list) -> str:
+    return ",".join(sorted(regions))
+
+_orig_send_alerts = send_alerts_map
+
+def send_alerts_map_dedup():
+    global last_alert_hash
+    import hashlib
+    try:
+        resp = requests.get(
+            "https://alerts.com.ua/api/states",
+            headers={"X-API-Key": "volumetric"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        states = resp.json().get("states", [])
+        active = sorted([s["name"] for s in states if s.get("alert")])
+        h = ",".join(active)
+        if h == last_alert_hash:
+            print(f"[{datetime.now(KYIV_TZ).strftime('%H:%M:%S')}] Тривоги не змінились — пропускаємо")
+            return
+        last_alert_hash = h
+        redis_set("last_alert_hash", h)
+    except Exception:
+        pass
+    send_alerts_map()
+
 if __name__ == "__main__":
     print("🤖 Бот запущено!")
 
+    # При старті — тільки новину, без тривоги (щоб не дублювати при рестартах)
     check_news()
-    send_alerts_map()
 
     schedule.every(15).minutes.do(check_news)
-    schedule.every(1).hours.do(send_alerts_map)
+    schedule.every(1).hours.do(send_alerts_map_dedup)
 
     while True:
         schedule.run_pending()
