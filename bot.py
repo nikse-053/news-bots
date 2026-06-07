@@ -292,48 +292,90 @@ def check_news():
 def check_alerts():
     global last_alert_hash
     print(f"[{now_str()}] Перевірка тривог...")
-    try:
-        resp = requests.get(
-            "https://alerts.com.ua/api/states",
-            headers={"X-API-Key": "volumetric"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        states = resp.json().get("states", [])
-        active = sorted([s["name"] for s in states if s.get("alert")])
-        current_hash = ",".join(active)
 
-        if current_hash == last_alert_hash:
-            print(f"[{now_str()}] Тривоги не змінились — пропускаємо")
-            return
+    ALERTS_KEY = os.environ.get("ALERTS_API_KEY", "")
+    active = None
 
-        last_alert_hash = current_hash
-        r_set_str("alert_hash", current_hash)
-
-        timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
-        if not active:
-            caption = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
-        else:
-            regions_text = "\n".join(f"🔴 {r}" for r in active)
-            caption = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions_text}"
-
+    # 1. ukrainealarm.com — офіційний API
+    if ALERTS_KEY:
         try:
-            img_bytes = generate_alert_map(active)
-            tg_send_photo(img_bytes, caption)
+            resp = requests.get(
+                "https://api.ukrainealarm.com/api/v3/alerts",
+                headers={"Authorization": ALERTS_KEY},
+                timeout=10,
+            )
+            if resp.ok:
+                data = resp.json()
+                active = sorted([
+                    r.get("regionName", "?")
+                    for r in data
+                    if r.get("activeAlerts")
+                ])
+                print(f"[{now_str()}] ukrainealarm OK")
         except Exception as e:
-            print(f"[Map Error] {e}")
-            tg_send(caption)
+            print(f"[Alerts ukrainealarm] {e}")
 
-        print(f"[{now_str()}] ✅ Тривоги: {len(active)} регіонів.")
+    # 2. Якщо немає ключа або помилка — беремо з Telegram каналу @air_alert_ua через RSS
+    if active is None:
+        try:
+            resp = requests.get(
+                "https://alerts.com.ua/api/states",
+                headers={"X-API-Key": "yourApiKey34421337"},
+                timeout=8,
+            )
+            if resp.ok:
+                states = resp.json().get("states", [])
+                active = sorted([s["name"] for s in states if s.get("alert")])
+                print(f"[{now_str()}] alerts.com.ua OK")
+        except Exception as e:
+            print(f"[Alerts alerts.com.ua] {e}")
 
+    if active is None:
+        print(f"[{now_str()}] Всі API тривог недоступні")
+        return
+
+    current_hash = ",".join(active)
+    if current_hash == last_alert_hash:
+        print(f"[{now_str()}] Тривоги не змінились — пропускаємо")
+        return
+
+    last_alert_hash = current_hash
+    r_set_str("alert_hash", current_hash)
+
+    timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
+    if not active:
+        caption = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
+    else:
+        regions_text = "\n".join(f"🔴 {r}" for r in active)
+        caption = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions_text}"
+
+    try:
+        img_bytes = generate_alert_map(active)
+        tg_send_photo(img_bytes, caption)
     except Exception as e:
-        print(f"[Alerts Error] {e}")
+        print(f"[Map Error] {e}")
+        tg_send(caption)
+
+    print(f"[{now_str()}] ✅ Тривоги: {len(active)} регіонів.")
 
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("🤖 Бот запущено!")
+
+    # Тест карти при старті
+    if os.environ.get("TEST_ALERTS") == "true":
+        print("🧪 Тестова карта тривог...")
+        test_regions = ["Харківська область", "Сумська область", "Донецька область"]
+        try:
+            img = generate_alert_map(test_regions)
+            caption = "<b>ТЕСТ карти тривог</b>\n\nХарківська, Сумська, Донецька обл."
+            tg_send_photo(img, caption)
+            print("✅ Тестова карта відправлена!")
+        except Exception as e:
+            print(f"❌ Помилка: {e}")
+
     check_news()
     schedule.every(15).minutes.do(check_news)
     schedule.every(30).minutes.do(check_alerts)
