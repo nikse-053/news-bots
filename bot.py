@@ -393,4 +393,4 @@ if __name__ == "__main__":
     schedule.every(2).minutes.do(check_alerts)
     while True:
         schedule.run_pending()
-        time.sleep(30)
+        time.sleep(30) 
