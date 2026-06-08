@@ -361,17 +361,12 @@ def check_alerts():
 
     timestamp = datetime.now(KYIV_TZ).strftime("%H:%M, %d.%m.%Y")
     if not active:
-        caption = f"<b>🚨 Карта тривог</b> | {timestamp}\n\n🟢 Наразі по всій Україні тихо."
+        caption = f"🟢 Відбій тривоги | {timestamp}\n\nПо всій Україні тихо."
     else:
         regions_text = "\n".join(f"🔴 {r}" for r in active)
-        caption = f"<b>🚨 Повітряна тривога!</b> | {timestamp}\n\n{regions_text}"
+        caption = f"🔴 Повітряна тривога! | {timestamp}\n\n{regions_text}"
 
-    try:
-        img_bytes = generate_alert_map(active)
-        tg_send_photo(img_bytes, caption)
-    except Exception as e:
-        print(f"[Map Error] {e}")
-        tg_send(caption)
+    tg_send(caption)
 
     print(f"[{now_str()}] ✅ Тривоги: {len(active)} регіонів.")
 
@@ -395,7 +390,7 @@ if __name__ == "__main__":
 
     check_news()
     schedule.every(15).minutes.do(check_news)
-    schedule.every(30).minutes.do(check_alerts)
+    schedule.every(2).minutes.do(check_alerts)
     while True:
         schedule.run_pending()
         time.sleep(30)
