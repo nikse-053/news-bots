@@ -199,6 +199,22 @@ def check_alerts():
 # ── Запуск ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, *args):
+            pass  # Тихий режим
+
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"🌐 Health server on port {port}")
+
     print("🤖 Бот запущено!")
     check_news()
     schedule.every(15).minutes.do(check_news)
