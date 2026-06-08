@@ -125,10 +125,17 @@ def r_get(key, default):
             headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
             timeout=5,
         )
-        val = resp.json().get("result")
+        data = resp.json()
+        val = data.get("result")
         if val is None:
             return default
-        return json.loads(val)
+        # Upstash повертає рядок — парсимо JSON
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except Exception:
+                return val
+        return val
     except Exception as e:
         print(f"[Redis GET '{key}'] {e}")
         return default
@@ -138,12 +145,19 @@ def r_set(key, value):
     if not UPSTASH_URL:
         return
     try:
-        requests.post(
-            f"{UPSTASH_URL}/set/{key}",
-            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}", "Content-Type": "application/json"},
-            json={"value": json.dumps(value, ensure_ascii=False)},
+        # Upstash REST API: GET /set/key/value
+        serialized = json.dumps(value, ensure_ascii=False)
+        import urllib.parse
+        encoded = urllib.parse.quote(serialized)
+        resp = requests.get(
+            f"{UPSTASH_URL}/set/{key}/{encoded}",
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
             timeout=5,
         )
+        if resp.ok:
+            print(f"[Redis SET '{key}'] OK")
+        else:
+            print(f"[Redis SET '{key}'] Error: {resp.status_code} {resp.text[:100]}")
     except Exception as e:
         print(f"[Redis SET '{key}'] {e}")
 
@@ -168,12 +182,15 @@ def r_set_str(key, value: str):
     if not UPSTASH_URL:
         return
     try:
-        requests.post(
-            f"{UPSTASH_URL}/set/{key}",
-            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}", "Content-Type": "application/json"},
-            json={"value": value},
+        import urllib.parse
+        encoded = urllib.parse.quote(value)
+        resp = requests.get(
+            f"{UPSTASH_URL}/set/{key}/{encoded}",
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
             timeout=5,
         )
+        if not resp.ok:
+            print(f"[Redis SET_STR '{key}'] Error: {resp.status_code}")
     except Exception as e:
         print(f"[Redis SET_STR '{key}'] {e}")
 
@@ -381,7 +398,4 @@ if __name__ == "__main__":
     schedule.every(30).minutes.do(check_alerts)
     while True:
         schedule.run_pending()
-        time.sleep(30) 
-
-
-
+        time.sleep(30)
